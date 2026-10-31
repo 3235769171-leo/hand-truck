@@ -1,0 +1,23 @@
+# Keil build products and machine-specific debugger state
+/MDK-ARM/HAND TRUCK/
+/MDK-ARM/DebugConfig/
+*.uvguix.*
+*.uvoptx
+*.o
+*.d
+*.crf
+*.lst
+*.axf
+*.map
+*.htm
+*.log
+*.bak
+
+# Host test and editor caches
+__pycache__/
+*.py[cod]
+.venv/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

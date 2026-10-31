@@ -28,9 +28,7 @@
 #define JC024_ROW_GAP_PX      20U
 #define JC024_MAX_NUMBER_CHARS_PER_LINE 8U
 #define JC024_MAX_NUMBER_CHARS (2U * JC024_MAX_NUMBER_CHARS_PER_LINE)
-#define JC024_CLEAR_FULL_SCREEN 1U
 #define JC024_TEXT_COMMAND_SIZE (JC014_QR_PAYLOAD_MAX_BYTES + 64U)
-#define JC024_NUMBER_Y        ((JC024_SCREEN_HEIGHT_PX - JC024_GLYPH_HEIGHT_PX) / 2U)
 #define JC024_FIRST_ROW_Y     ((JC024_SCREEN_HEIGHT_PX - \
                                 (2U * JC024_GLYPH_HEIGHT_PX + \
                                  JC024_ROW_GAP_PX)) / 2U)
@@ -60,6 +58,16 @@ static char jc024_draw_batch[JC024_DRAW_BATCH_SIZE];
 
 typedef enum
 {
+  JC024_DISPLAY_UNKNOWN = 0U,
+  JC024_DISPLAY_NUMBER,
+  JC024_DISPLAY_TEXT
+} JC024_DisplayType_t;
+
+static JC024_DisplayType_t jc024_display_type;
+static char jc024_display_text[JC014_QR_PAYLOAD_MAX_BYTES + 1U];
+
+typedef enum
+{
   JC024_ACK_UNKNOWN = 0U,
   JC024_ACK_AVAILABLE,
   JC024_ACK_UNAVAILABLE
@@ -67,34 +75,27 @@ typedef enum
 
 static JC024_AckState_t jc024_ack_state = JC024_ACK_UNKNOWN;
 
-static const uint8_t glyph_rows[GLYPH_COUNT][JC024_GLYPH_ROWS] =
+/* Bits A..G: top, upper-right, lower-right, bottom, lower-left, upper-left, middle. */
+static const uint8_t digit_segments[10] =
 {
-  {0x1CU, 0x3EU, 0x63U, 0x63U, 0x63U, 0x63U, 0x63U,
-   0x63U, 0x63U, 0x63U, 0x63U, 0x63U, 0x3EU, 0x1CU},
-  {0x0CU, 0x1CU, 0x3CU, 0x0CU, 0x0CU, 0x0CU, 0x0CU,
-   0x0CU, 0x0CU, 0x0CU, 0x0CU, 0x0CU, 0x3EU, 0x3EU},
-  {0x1CU, 0x3EU, 0x63U, 0x03U, 0x03U, 0x06U, 0x0CU,
-   0x18U, 0x30U, 0x60U, 0x60U, 0x60U, 0x7FU, 0x7FU},
-  {0x7EU, 0x03U, 0x03U, 0x06U, 0x1EU, 0x1EU, 0x06U,
-   0x03U, 0x03U, 0x03U, 0x03U, 0x06U, 0x7EU, 0x7CU},
-  {0x06U, 0x0EU, 0x1EU, 0x36U, 0x66U, 0x66U, 0x66U,
-   0x7FU, 0x7FU, 0x06U, 0x06U, 0x06U, 0x06U, 0x06U},
-  {0x7FU, 0x7FU, 0x60U, 0x60U, 0x7EU, 0x7FU, 0x03U,
-   0x03U, 0x03U, 0x03U, 0x03U, 0x06U, 0x7EU, 0x7CU},
-  {0x1EU, 0x30U, 0x60U, 0x60U, 0x7EU, 0x63U, 0x63U,
-   0x63U, 0x63U, 0x63U, 0x63U, 0x63U, 0x3EU, 0x1CU},
-  {0x7FU, 0x7FU, 0x03U, 0x06U, 0x0CU, 0x18U, 0x18U,
-   0x30U, 0x30U, 0x30U, 0x30U, 0x30U, 0x30U, 0x30U},
-  {0x3EU, 0x63U, 0x63U, 0x63U, 0x3EU, 0x63U, 0x63U,
-   0x63U, 0x63U, 0x63U, 0x63U, 0x63U, 0x3EU, 0x1CU},
-  {0x3EU, 0x63U, 0x63U, 0x63U, 0x63U, 0x63U, 0x63U,
-   0x3FU, 0x03U, 0x03U, 0x03U, 0x06U, 0x3CU, 0x38U},
-  {0x00U, 0x00U, 0x0CU, 0x0CU, 0x0CU, 0x0CU, 0x7FU,
-   0x7FU, 0x0CU, 0x0CU, 0x0CU, 0x0CU, 0x00U, 0x00U},
-  {0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x7FU,
-   0x7FU, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U},
-  {0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
-   0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x0CU, 0x0CU}
+  0x3FU, 0x06U, 0x5BU, 0x4FU, 0x66U,
+  0x6DU, 0x7DU, 0x07U, 0x7FU, 0x6FU
+};
+
+typedef struct
+{
+  uint8_t x1;
+  uint8_t y1;
+  uint8_t x2;
+  uint8_t y2;
+} JC024_GlyphBox_t;
+
+/* Grid units are 5x6 pixels. Vertical segments reach both ends of the cell. */
+static const JC024_GlyphBox_t segment_boxes[7] =
+{
+  {0U, 0U, 6U, 1U}, {5U, 0U, 6U, 6U}, {5U, 7U, 6U, 13U},
+  {0U, 12U, 6U, 13U}, {0U, 7U, 1U, 13U}, {0U, 0U, 1U, 6U},
+  {0U, 6U, 6U, 7U}
 };
 
 static const uint8_t line_glyphs[2][8] =
@@ -117,6 +118,7 @@ void JC014_Init(void)
   jc014_mutex = xSemaphoreCreateMutex();
   jc014_screen_configured = 0U;
   jc024_ack_state = JC024_ACK_UNKNOWN;
+  jc024_display_type = JC024_DISPLAY_UNKNOWN;
   configASSERT(jc014_mutex != NULL);
 }
 
@@ -142,6 +144,8 @@ HAL_StatusTypeDef JC014_SendCommand(const char *command, uint32_t wait_ms)
     return HAL_ERROR;
   }
 
+  /* A failed or external command can leave the old picture partially changed. */
+  jc024_display_type = JC024_DISPLAY_UNKNOWN;
   status = HAL_UART_Transmit(&huart4, (uint8_t *)command,
                              (uint16_t)length, JC024_UART_TIMEOUT_MS);
   if (status != HAL_OK)
@@ -248,112 +252,131 @@ static HAL_StatusTypeDef JC024_PrepareScreen(void)
   return status;
 }
 
-static HAL_StatusTypeDef JC024_DrawGlyph(uint16_t x, uint16_t y,
-                                         uint8_t glyph_id,
-                                         uint8_t clear_before)
+static HAL_StatusTypeDef JC024_ClearArea(uint16_t x1, uint16_t y1,
+                                        uint16_t x2, uint16_t y2)
 {
-  uint8_t row;
-  uint8_t row_end;
-  uint8_t column;
-  uint8_t first_column;
-  uint8_t row_bits;
-  uint16_t x1;
-  uint16_t x2;
-  uint16_t y1;
-  uint16_t y2;
-  size_t batch_length = 0U;
-  uint16_t box_count = 0U;
-  size_t remaining;
-  int written;
-  uint32_t wait_ms;
-  HAL_StatusTypeDef status;
-
-  if (clear_before == JC024_CLEAR_FULL_SCREEN)
-  {
-    written = snprintf(jc024_draw_batch, sizeof(jc024_draw_batch),
-                       "BOXF(0,0,319,239,15);");
-    if ((written < 0) || ((size_t)written >= sizeof(jc024_draw_batch)))
-    {
-      return HAL_ERROR;
-    }
-    batch_length = (size_t)written;
-    box_count = 1U;
-  }
-  for (row = 0U; row < JC024_GLYPH_ROWS; row++)
-  {
-    row_bits = glyph_rows[glyph_id][row];
-    row_end = (uint8_t)(row + 1U);
-    while ((row_end < JC024_GLYPH_ROWS) &&
-           (glyph_rows[glyph_id][row_end] == row_bits))
-    {
-      row_end++;
-    }
-
-    column = 0U;
-    while (column < JC024_GLYPH_COLUMNS)
-    {
-      while ((column < JC024_GLYPH_COLUMNS) &&
-             ((row_bits & (1U << (JC024_GLYPH_COLUMNS - 1U - column))) == 0U))
-      {
-        column++;
-      }
-      if (column >= JC024_GLYPH_COLUMNS)
-      {
-        break;
-      }
-
-      first_column = column;
-      while ((column < JC024_GLYPH_COLUMNS) &&
-             ((row_bits & (1U << (JC024_GLYPH_COLUMNS - 1U - column))) != 0U))
-      {
-        column++;
-      }
-
-      x1 = (uint16_t)(x + first_column * JC024_PIXEL_WIDTH_PX);
-      x2 = (uint16_t)(x + column * JC024_PIXEL_WIDTH_PX - 1U);
-      y1 = (uint16_t)(y + row * JC024_PIXEL_HEIGHT_PX);
-      y2 = (uint16_t)(y + row_end * JC024_PIXEL_HEIGHT_PX - 1U);
-
-      remaining = sizeof(jc024_draw_batch) - batch_length;
-      written = snprintf(&jc024_draw_batch[batch_length], remaining,
-                         "BOXF(%u,%u,%u,%u,0);",
+  int written = snprintf(jc024_draw_batch, sizeof(jc024_draw_batch),
+                         "BOXF(%u,%u,%u,%u,15);\r\n",
                          (unsigned int)x1, (unsigned int)y1,
                          (unsigned int)x2, (unsigned int)y2);
-      if ((remaining < 3U) || (written < 0) ||
-          ((size_t)written > remaining - 3U))
-      {
-        return HAL_ERROR;
-      }
-
-      batch_length += (size_t)written;
-      box_count++;
-    }
-
-    row = (uint8_t)(row_end - 1U);
-  }
-
-  if (batch_length > 0U)
+  if ((written < 0) || ((size_t)written >= sizeof(jc024_draw_batch)))
   {
-    if ((batch_length + 2U) >= sizeof(jc024_draw_batch))
+    return HAL_ERROR;
+  }
+  return JC014_SendCommand(jc024_draw_batch, JC024_CLEAR_WAIT_MS);
+}
+
+static HAL_StatusTypeDef JC024_AppendBox(size_t *length, uint16_t x1,
+                                        uint16_t y1, uint16_t x2,
+                                        uint16_t y2, uint8_t color)
+{
+  size_t remaining = sizeof(jc024_draw_batch) - *length;
+  int written;
+  if (remaining < 3U)
+  {
+    return HAL_ERROR;
+  }
+  written = snprintf(&jc024_draw_batch[*length], remaining,
+                     "BOXF(%u,%u,%u,%u,%u);",
+                     (unsigned int)x1, (unsigned int)y1,
+                     (unsigned int)x2, (unsigned int)y2, (unsigned int)color);
+  if ((written < 0) || ((size_t)written > remaining - 3U))
+  {
+    return HAL_ERROR;
+  }
+  *length += (size_t)written;
+  return HAL_OK;
+}
+
+static HAL_StatusTypeDef JC024_DrawGlyph(uint16_t x, uint16_t y,
+                                         uint8_t glyph_id, uint8_t clear_cell)
+{
+  JC024_GlyphBox_t boxes[7];
+  uint8_t count = 0U;
+  uint8_t index;
+  uint8_t segments;
+  size_t batch_length = 0U;
+  HAL_StatusTypeDef status;
+
+  if ((glyph_id >= GLYPH_COUNT) ||
+      ((uint32_t)x + JC024_GLYPH_WIDTH_PX > JC024_SCREEN_WIDTH_PX) ||
+      ((uint32_t)y + JC024_GLYPH_HEIGHT_PX > JC024_SCREEN_HEIGHT_PX))
+  {
+    return HAL_ERROR;
+  }
+  if (glyph_id <= GLYPH_9)
+  {
+    segments = digit_segments[glyph_id];
+    if ((segments & 0x06U) == 0x06U)
     {
-      return HAL_ERROR;
+      const JC024_GlyphBox_t right = {5U, 0U, 6U, 13U};
+      boxes[count++] = right;
+      segments &= (uint8_t)~0x06U;
     }
-    jc024_draw_batch[batch_length++] = '\r';
-    jc024_draw_batch[batch_length++] = '\n';
-    jc024_draw_batch[batch_length] = '\0';
-    wait_ms = (uint32_t)box_count * JC024_BOX_TIME_MS;
-    if (clear_before == JC024_CLEAR_FULL_SCREEN)
+    if ((segments & 0x30U) == 0x30U)
     {
-      wait_ms += JC024_CLEAR_WAIT_MS;
+      const JC024_GlyphBox_t left = {0U, 0U, 1U, 13U};
+      boxes[count++] = left;
+      segments &= (uint8_t)~0x30U;
     }
-    status = JC014_SendCommand(jc024_draw_batch, wait_ms);
+    for (index = 0U; index < 7U; index++)
+    {
+      if ((segments & (1U << index)) != 0U)
+      {
+        boxes[count++] = segment_boxes[index];
+      }
+    }
+  }
+  else if (glyph_id == GLYPH_DOT)
+  {
+    const JC024_GlyphBox_t dot = {3U, 12U, 4U, 13U};
+    boxes[count++] = dot;
+  }
+  else
+  {
+    boxes[count++] = segment_boxes[6];
+    if (glyph_id == GLYPH_PLUS)
+    {
+      const JC024_GlyphBox_t vertical = {2U, 3U, 4U, 10U};
+      boxes[count++] = vertical;
+    }
+  }
+  if (clear_cell != 0U)
+  {
+    status = JC024_AppendBox(&batch_length, x, y,
+                             (uint16_t)(x + JC024_GLYPH_WIDTH_PX - 1U),
+                             (uint16_t)(y + JC024_GLYPH_HEIGHT_PX - 1U), 15U);
     if (status != HAL_OK)
     {
       return status;
     }
   }
+  for (index = 0U; index < count; index++)
+  {
+    const JC024_GlyphBox_t *box = &boxes[index];
+    status = JC024_AppendBox(
+        &batch_length,
+        (uint16_t)(x + box->x1 * JC024_PIXEL_WIDTH_PX),
+        (uint16_t)(y + box->y1 * JC024_PIXEL_HEIGHT_PX),
+        (uint16_t)(x + (box->x2 + 1U) * JC024_PIXEL_WIDTH_PX - 1U),
+        (uint16_t)(y + (box->y2 + 1U) * JC024_PIXEL_HEIGHT_PX - 1U), 0U);
+    if (status != HAL_OK)
+    {
+      return status;
+    }
+  }
+  jc024_draw_batch[batch_length++] = '\r';
+  jc024_draw_batch[batch_length++] = '\n';
+  jc024_draw_batch[batch_length] = '\0';
+  return JC014_SendCommand(jc024_draw_batch,
+                           ((uint32_t)count + (clear_cell != 0U ? 1U : 0U)) *
+                           JC024_BOX_TIME_MS);
+}
 
-  return HAL_OK;
+static void JC024_RememberDisplay(const char *text, JC024_DisplayType_t type)
+{
+  memcpy(jc024_display_text, text, strlen(text) + 1U);
+  jc024_display_type = type;
 }
 
 HAL_StatusTypeDef JC014_ShowStartupScreen(void)
@@ -447,98 +470,125 @@ HAL_StatusTypeDef JC014_ShowNumber(const char *text)
 {
   uint8_t glyph_ids[2][JC024_MAX_NUMBER_CHARS_PER_LINE];
   uint8_t row_char_counts[2];
-  uint8_t number_rows;
+  uint8_t previous_counts[2] = {0U, 0U};
+  uint8_t previous_number;
+  uint8_t same_positions;
   uint8_t row;
   uint8_t column;
   size_t length;
   size_t index;
+  size_t previous_length;
   uint16_t row_width;
   uint16_t x;
   uint16_t y;
-  uint16_t row_start_y;
-  uint8_t clear_before;
   HAL_StatusTypeDef status;
 
   if (text == NULL)
   {
     return HAL_ERROR;
   }
-
   length = strlen(text);
   if ((length == 0U) || (length > JC024_MAX_NUMBER_CHARS))
   {
     return HAL_ERROR;
   }
-
-  number_rows = (length > JC024_MAX_NUMBER_CHARS_PER_LINE) ? 2U : 1U;
   row_char_counts[0] = (length > JC024_MAX_NUMBER_CHARS_PER_LINE) ?
                        JC024_MAX_NUMBER_CHARS_PER_LINE : (uint8_t)length;
-  row_char_counts[1] = (number_rows == 2U) ?
-                       (uint8_t)(length - row_char_counts[0]) : 0U;
-
+  row_char_counts[1] = (uint8_t)(length - row_char_counts[0]);
   for (index = 0U; index < length; index++)
   {
-    uint8_t glyph_id;
-
-    if (JC024_MapNumberGlyph(text[index], &glyph_id) == 0U)
+    if (JC024_MapNumberGlyph(text[index],
+          &glyph_ids[index / JC024_MAX_NUMBER_CHARS_PER_LINE]
+                    [index % JC024_MAX_NUMBER_CHARS_PER_LINE]) == 0U)
     {
       return HAL_ERROR;
     }
-    if (index < row_char_counts[0])
-    {
-      glyph_ids[0][index] = glyph_id;
-    }
-    else
-    {
-      glyph_ids[1][index - row_char_counts[0]] = glyph_id;
-    }
   }
-
   if ((jc014_mutex == NULL) ||
       (xSemaphoreTake(jc014_mutex, portMAX_DELAY) != pdTRUE))
   {
     return HAL_ERROR;
   }
 
+  previous_number = (jc024_display_type == JC024_DISPLAY_NUMBER) ? 1U : 0U;
+  if ((previous_number != 0U) && (strcmp(jc024_display_text, text) == 0))
+  {
+    jc014_status = JC014_STATUS_OK;
+    (void)xSemaphoreGive(jc014_mutex);
+    return HAL_OK;
+  }
+  if (previous_number != 0U)
+  {
+    previous_length = strlen(jc024_display_text);
+    previous_counts[0] = (previous_length > JC024_MAX_NUMBER_CHARS_PER_LINE) ?
+                         JC024_MAX_NUMBER_CHARS_PER_LINE : (uint8_t)previous_length;
+    previous_counts[1] = (uint8_t)(previous_length - previous_counts[0]);
+  }
+  /* Retain old text for comparisons, but do not trust it after a partial update. */
+  jc024_display_type = JC024_DISPLAY_UNKNOWN;
   status = JC024_PrepareScreen();
   if (status != HAL_OK)
   {
-    jc014_status = JC014_STATUS_UART_ERROR;
-    (void)xSemaphoreGive(jc014_mutex);
-    return status;
+    goto number_failed;
   }
-
-  clear_before = JC024_CLEAR_FULL_SCREEN;
-
-  for (row = 0U; row < number_rows; row++)
+  if (previous_number == 0U)
   {
+    status = JC024_ClearArea(0U, 0U, JC024_SCREEN_WIDTH_PX - 1U,
+                             JC024_SCREEN_HEIGHT_PX - 1U);
+    if (status != HAL_OK)
+    {
+      goto number_failed;
+    }
+  }
+  for (row = 0U; row < 2U; row++)
+  {
+    same_positions = ((previous_number != 0U) &&
+                      (previous_counts[row] == row_char_counts[row])) ? 1U : 0U;
+    if ((previous_number != 0U) && (same_positions == 0U))
+    {
+      status = JC024_ClearArea(0U,
+          (uint16_t)(row * (JC024_SCREEN_HEIGHT_PX / 2U)),
+          JC024_SCREEN_WIDTH_PX - 1U,
+          (uint16_t)((row + 1U) * (JC024_SCREEN_HEIGHT_PX / 2U) - 1U));
+      if (status != HAL_OK)
+      {
+        goto number_failed;
+      }
+    }
+    if (row_char_counts[row] == 0U)
+    {
+      continue;
+    }
     row_width = (uint16_t)(row_char_counts[row] * JC024_GLYPH_WIDTH_PX +
                            (row_char_counts[row] - 1U) * JC024_CHAR_GAP_PX);
     x = (uint16_t)((JC024_SCREEN_WIDTH_PX - row_width) / 2U);
-    row_start_y = JC024_FIRST_ROW_Y;
-    y = (uint16_t)(row_start_y + row *
+    y = (uint16_t)(JC024_FIRST_ROW_Y + row *
                    (JC024_GLYPH_HEIGHT_PX + JC024_ROW_GAP_PX));
-
     for (column = 0U; column < row_char_counts[row]; column++)
     {
-      /* Send one complete glyph at a time, below the screen's command limit. */
+      index = (size_t)row * JC024_MAX_NUMBER_CHARS_PER_LINE + column;
+      if ((same_positions != 0U) && (jc024_display_text[index] == text[index]))
+      {
+        continue;
+      }
       status = JC024_DrawGlyph(
-          (uint16_t)(x + column *
-                     (JC024_GLYPH_WIDTH_PX + JC024_CHAR_GAP_PX)),
-          y, glyph_ids[row][column],
-          ((row == 0U) && (column == 0U)) ? clear_before : 0U);
+          (uint16_t)(x + column * (JC024_GLYPH_WIDTH_PX + JC024_CHAR_GAP_PX)),
+          y, glyph_ids[row][column], same_positions);
       if (status != HAL_OK)
       {
-        jc014_status = JC014_STATUS_UART_ERROR;
-        (void)xSemaphoreGive(jc014_mutex);
-        return status;
+        goto number_failed;
       }
     }
   }
-
+  JC024_RememberDisplay(text, JC024_DISPLAY_NUMBER);
   jc014_status = JC014_STATUS_OK;
   (void)xSemaphoreGive(jc014_mutex);
   return HAL_OK;
+
+number_failed:
+  jc014_status = JC014_STATUS_UART_ERROR;
+  (void)xSemaphoreGive(jc014_mutex);
+  return status;
 }
 
 HAL_StatusTypeDef JC014_ShowQrPayload(const char *text)
@@ -600,6 +650,14 @@ HAL_StatusTypeDef JC014_ShowQrPayload(const char *text)
     return HAL_ERROR;
   }
 
+  if ((jc024_display_type == JC024_DISPLAY_TEXT) &&
+      (strcmp(jc024_display_text, text) == 0))
+  {
+    jc014_status = JC014_STATUS_OK;
+    (void)xSemaphoreGive(jc014_mutex);
+    return HAL_OK;
+  }
+  jc024_display_type = JC024_DISPLAY_UNKNOWN;
   status = JC024_PrepareScreen();
   if (status == HAL_OK)
   {
@@ -612,6 +670,7 @@ HAL_StatusTypeDef JC014_ShowQrPayload(const char *text)
   }
   else
   {
+    JC024_RememberDisplay(text, JC024_DISPLAY_TEXT);
     jc014_status = JC014_STATUS_OK;
   }
 

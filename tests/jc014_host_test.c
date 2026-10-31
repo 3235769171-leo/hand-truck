@@ -9,21 +9,24 @@ static uint8_t expected[240][320];
 static uint32_t tick, busy_until;
 static unsigned int sends, largest_send, protocol_errors, early_sends;
 static unsigned int fail_send, ack_index;
+static unsigned int watch_updates, outside_updates;
+static unsigned int watch_x1, watch_y1, watch_x2, watch_y2;
 static int ack_enabled, mutex_locked, failures;
+static char recorded_text[97];
 
-/* Golden bitmaps for the existing large font, independent of the driver table. */
+/* Hand-checked seven-segment silhouettes on the 7x14 grid. */
 static const uint8_t font[13][14] = {
-  {28,62,99,99,99,99,99,99,99,99,99,99,62,28},
-  {12,28,60,12,12,12,12,12,12,12,12,12,62,62},
-  {28,62,99,3,3,6,12,24,48,96,96,96,127,127},
-  {126,3,3,6,30,30,6,3,3,3,3,6,126,124},
-  {6,14,30,54,102,102,102,127,127,6,6,6,6,6},
-  {127,127,96,96,126,127,3,3,3,3,3,6,126,124},
-  {30,48,96,96,126,99,99,99,99,99,99,99,62,28},
-  {127,127,3,6,12,24,24,48,48,48,48,48,48,48},
-  {62,99,99,99,62,99,99,99,99,99,99,99,62,28},
-  {62,99,99,99,99,99,99,63,3,3,3,6,60,56},
-  {0,0,12,12,12,12,127,127,12,12,12,12,0,0},
+  {127,127,99,99,99,99,99,99,99,99,99,99,127,127},
+  {3,3,3,3,3,3,3,3,3,3,3,3,3,3},
+  {127,127,3,3,3,3,127,127,96,96,96,96,127,127},
+  {127,127,3,3,3,3,127,127,3,3,3,3,127,127},
+  {99,99,99,99,99,99,127,127,3,3,3,3,3,3},
+  {127,127,96,96,96,96,127,127,3,3,3,3,127,127},
+  {127,127,96,96,96,96,127,127,99,99,99,99,127,127},
+  {127,127,3,3,3,3,3,3,3,3,3,3,3,3},
+  {127,127,99,99,99,99,127,127,99,99,99,99,127,127},
+  {127,127,99,99,99,99,127,127,3,3,3,3,127,127},
+  {0,0,0,28,28,28,127,127,28,28,28,0,0,0},
   {0,0,0,0,0,0,127,127,0,0,0,0,0,0},
   {0,0,0,0,0,0,0,0,0,0,0,0,12,12}
 };
@@ -76,10 +79,16 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, uint8_t *data,
       if (x1 > x2 || x2 >= 320 || y1 > y2 || y2 >= 240 ||
           (color != 0 && color != 15)) { protocol_errors++; }
       else {
+        if (watch_updates && (x1 < watch_x1 || x2 > watch_x2 ||
+                              y1 < watch_y1 || y2 > watch_y2)) outside_updates++;
         for (y = y1; y <= y2; y++)
           for (x = x1; x <= x2; x++) screen[y][x] = color == 0;
       }
       work_ms += (x1 == 0 && y1 == 0 && x2 == 319 && y2 == 239) ? 120 : 40;
+    } else if (strncmp(command, "DC16(", 5) == 0) {
+      if (sscanf(command, "DC16(%u,%u,'%96[^']',%u)",
+                 &x1, &y1, recorded_text, &color) != 4) protocol_errors++;
+      work_ms += 40;
     } else if (strcmp(command, "DIR(1)") != 0) {
       protocol_errors++;
     }
@@ -94,6 +103,8 @@ static void reset(int use_ack)
   memset(screen, 0, sizeof(screen));
   tick = busy_until = sends = largest_send = protocol_errors = early_sends = 0;
   fail_send = ack_index = 0; ack_enabled = use_ack; mutex_locked = 0;
+  watch_updates = outside_updates = 0;
+  recorded_text[0] = '\0';
   JC014_Init();
 }
 
@@ -185,6 +196,134 @@ static void reject_oversized_command(void)
   puts("PASS: raw commands respect screen length limit");
 }
 
+static void duplicate_payload(int use_ack, const char *payload)
+{
+  unsigned int previous_sends;
+  uint32_t previous_tick;
+  reset(use_ack);
+  CHECK(JC014_ShowQrPayload(payload) == HAL_OK, "first duplicate fixture failed");
+  memcpy(expected, screen, sizeof(screen));
+  previous_sends = sends; previous_tick = tick;
+  CHECK(JC014_ShowQrPayload(payload) == HAL_OK, "duplicate request failed");
+  CHECK(sends == previous_sends && tick == previous_tick,
+        "identical payload '%s' caused UART activity or waiting", payload);
+  CHECK(!memcmp(screen, expected, sizeof(screen)), "duplicate altered the picture");
+  puts("PASS: duplicate payload leaves screen and UART unchanged");
+}
+
+static void change_one_character(void)
+{
+  uint32_t previous_tick;
+  reset(1);
+  CHECK(JC014_ShowNumber("321+123") == HAL_OK, "one-character fixture failed");
+  watch_updates = 1; watch_x1 = 253; watch_x2 = 287;
+  watch_y1 = 26; watch_y2 = 109; previous_tick = tick;
+  CHECK(JC014_ShowNumber("321+124") == HAL_OK, "one-character update failed");
+  CHECK(!outside_updates, "one-character update redrew unchanged screen areas");
+  CHECK(tick - previous_tick <= 400, "one-character update took too much waiting");
+  memset(expected, 0, sizeof(expected)); expected_row("321+124", 31, 26);
+  CHECK(!memcmp(screen, expected, sizeof(screen)), "one-character update picture wrong");
+  CHECK(!early_sends && !protocol_errors, "one-character update broke the protocol");
+  printf("PASS: one-character update, %lu ms simulated waiting\n",
+         (unsigned long)(tick - previous_tick));
+}
+
+static void resize_and_remove_bottom_row(void)
+{
+  reset(0);
+  CHECK(JC014_ShowNumber("321+123+456+654") == HAL_OK, "bottom-row fixture failed");
+  watch_updates = 1; watch_x1 = 0; watch_x2 = 319;
+  watch_y1 = 120; watch_y2 = 239;
+  CHECK(JC014_ShowNumber("321+123+456") == HAL_OK, "bottom-row resize failed");
+  memset(expected, 0, sizeof(expected));
+  expected_row("321+123+", 13, 26); expected_row("456", 105, 130);
+  CHECK(!memcmp(screen, expected, sizeof(screen)), "resized bottom row left old pixels");
+  CHECK(JC014_ShowNumber("321+123+") == HAL_OK, "bottom-row removal failed");
+  memset(expected, 0, sizeof(expected)); expected_row("321+123+", 13, 26);
+  CHECK(!memcmp(screen, expected, sizeof(screen)), "removed bottom row left old pixels");
+  CHECK(!outside_updates, "bottom-only change redrew the top half");
+  CHECK(!early_sends && !protocol_errors, "bottom-row update protocol failed");
+  puts("PASS: bottom-row resize/removal preserves top half");
+}
+
+static void invalidate_after_external_drawing(void)
+{
+  unsigned int before;
+  reset(1);
+  CHECK(JC014_ShowNumber("321+123") == HAL_OK, "cache invalidation fixture failed");
+  CHECK(JC014_ClearScreen() == HAL_OK, "explicit clear failed");
+  before = sends;
+  CHECK(JC014_ShowNumber("321+123") == HAL_OK && sends > before,
+        "same data after clear was incorrectly skipped");
+  CHECK(JC014_SendCommand("BOXF(0,0,10,10,0);\r\n", 50) == HAL_OK,
+        "external drawing fixture failed");
+  before = sends;
+  CHECK(JC014_ShowNumber("321+123") == HAL_OK && sends > before,
+        "same data after raw drawing was incorrectly skipped");
+  memset(expected, 0, sizeof(expected)); expected_row("321+123", 31, 26);
+  CHECK(!memcmp(screen, expected, sizeof(screen)), "external pixels were not cleared");
+  puts("PASS: clear/raw commands invalidate cached screen");
+}
+
+static void partial_failure_invalidates_cache(void)
+{
+  reset(1);
+  CHECK(JC014_ShowNumber("321+123") == HAL_OK, "partial-error fixture failed");
+  fail_send = sends + 2;
+  CHECK(JC014_ShowNumber("421+124") == HAL_ERROR, "partial update error was ignored");
+  CHECK(!mutex_locked, "partial update failure leaked mutex");
+  fail_send = 0;
+  CHECK(JC014_ShowNumber("321+123") == HAL_OK, "old data retry failed");
+  memset(expected, 0, sizeof(expected)); expected_row("321+123", 31, 26);
+  CHECK(!memcmp(screen, expected, sizeof(screen)), "stale cache preserved a partial update");
+  puts("PASS: partial failure forces full recovery before caching");
+}
+
+static void text_number_text_transition(void)
+{
+  unsigned int previous_sends;
+  reset(1);
+  CHECK(JC014_ShowQrPayload("HELLO") == HAL_OK, "text fixture failed");
+  CHECK(!strcmp(recorded_text, "HELLO"), "requested text never reached the screen");
+  previous_sends = sends;
+  CHECK(JC014_ShowQrPayload("HELLO") == HAL_OK && sends == previous_sends,
+        "text duplicate was not skipped");
+  CHECK(JC014_ShowQrPayload("321+123") == HAL_OK, "text-to-number transition failed");
+  memset(expected, 0, sizeof(expected)); expected_row("321+123", 31, 26);
+  CHECK(!memcmp(screen, expected, sizeof(screen)), "text-to-number picture wrong");
+  previous_sends = sends; recorded_text[0] = '\0';
+  CHECK(JC014_ShowQrPayload("HELLO") == HAL_OK && sends > previous_sends,
+        "returning to old text was incorrectly skipped");
+  CHECK(!strcmp(recorded_text, "HELLO"), "number-to-text sent the wrong text");
+  CHECK(!protocol_errors && !early_sends && !mutex_locked,
+        "text/number mode change broke the protocol or mutex");
+  puts("PASS: text-number-text transitions verify actual outgoing text");
+}
+
+static void digit_height_and_speed(void)
+{
+  char text[2] = {0, 0};
+  unsigned int digit, x, y, min_y, max_y;
+  for (digit = 0; digit < 10; digit++) {
+    reset(0); text[0] = (char)('0' + digit);
+    CHECK(JC014_ShowNumber(text) == HAL_OK, "digit height fixture failed");
+    min_y = 240; max_y = 0;
+    for (y = 0; y < 240; y++) for (x = 0; x < 320; x++)
+      if (screen[y][x]) { if (y < min_y) min_y = y; if (y > max_y) max_y = y; }
+    CHECK(min_y == 26 && max_y == 109 && (max_y - min_y + 1) * 153 > 12000,
+          "digit %u actual ink height is not 84px / above 12mm", digit);
+  }
+  reset(0);
+  CHECK(JC014_ShowNumber("321+123") == HAL_OK && tick <= 1600,
+        "short expression did not become faster (waiting %lu ms)", (unsigned long)tick);
+  printf("PASS: short expression %lu ms simulated waiting\n", (unsigned long)tick);
+  reset(0);
+  CHECK(JC014_ShowNumber("321+123+456+654") == HAL_OK && tick <= 3200,
+        "long expression did not become faster (waiting %lu ms)", (unsigned long)tick);
+  printf("PASS: long expression %lu ms simulated waiting; all digits 84px tall\n",
+         (unsigned long)tick);
+}
+
 int main(void)
 {
   startup_white();
@@ -198,6 +337,15 @@ int main(void)
   send_error_recovery();
   invalid_inputs();
   reject_oversized_command();
+  duplicate_payload(0, "321+123");
+  duplicate_payload(1, "321+123+456+654");
+  duplicate_payload(0, "HELLO");
+  change_one_character();
+  resize_and_remove_bottom_row();
+  invalidate_after_external_drawing();
+  partial_failure_invalidates_cache();
+  text_number_text_transition();
+  digit_height_and_speed();
   printf("%d failed checks\n", failures);
   return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
